@@ -1,0 +1,93 @@
+#include <windows.h>
+#include <tlhelp32.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+
+#define DEFAULT_MONITOR_INTERVAL 5000
+#define DEFAULT_CPU_THRESHOLD 1000000 // Example threshold in 100-nanosecond intervals
+
+volatile BOOL keepMonitoring = TRUE; // Flag to control monitoring loop
+
+void logToFile(const char* message) {
+    FILE* logFile = fopen("process_monitor.log", "a");
+    if (logFile) {
+        fprintf(logFile, "%s\n", message);
+        fclose(logFile);
+    }
+}
+
+void checkProcesses(ULONGLONG cpuThreshold) {
+    HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPALL, 0);
+    if (hSnap == INVALID_HANDLE_VALUE) return;
+
+    PROCESSENTRY32 pe32 = {0};
+    pe32.dwSize = sizeof(PROCESSENTRY32);
+
+    if (Process32First(hSnap, &pe32)) {
+        do {
+            HANDLE hProc = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pe32.th32ProcessID);
+            if (hProc) {
+                FILETIME ftCreation, ftExit, ftKernel, ftUser;
+                GetProcessTimes(hProc, &ftCreation, &ftExit, &ftKernel, &ftUser);
+
+                ULARGE_INTEGER userTime = {ftUser.dwLowDateTime, ftUser.dwHighDateTime};
+                ULARGE_INTEGER kernelTime = {ftKernel.dwLowDateTime, ftKernel.dwHighDateTime};
+
+                ULONGLONG totalCpuTime = userTime.QuadPart + kernelTime.QuadPart;
+                if (totalCpuTime > cpuThreshold) {
+                    char logMessage[256];
+                    time_t now = time(NULL);
+                    struct tm* local = localtime(&now);
+                    sprintf(logMessage, "[%02d:%02d:%02d] Process: %s (ID: %u), CPU Time: %llu",
+                            local->tm_hour, local->tm_min, local->tm_sec, pe32.szExeFile, pe32.th32ProcessID, totalCpuTime);
+                    printf("%s\n", logMessage);
+                    logToFile(logMessage);
+                }
+
+                CloseHandle(hProc);
+            }
+        } while (Process32Next(hSnap, &pe32));
+    }
+    CloseHandle(hSnap);
+}
+
+DWORD WINAPI monitorThread(LPVOID param) {
+    ULONGLONG cpuThreshold = *(ULONGLONG*)param;
+    int interval = DEFAULT_MONITOR_INTERVAL;
+
+    while (keepMonitoring) {
+        checkProcesses(cpuThreshold);
+        Sleep(interval);
+    }
+    return 0;
+}
+
+int main() {
+    ULONGLONG cpuThreshold;
+    int interval;
+
+    printf("Enter CPU time threshold (in 100-nanosecond intervals): ");
+    scanf("%llu", &cpuThreshold);
+
+    printf("Enter monitoring interval (in milliseconds): ");
+    scanf("%d", &interval);
+
+    HANDLE hThread = CreateThread(NULL, 0, monitorThread, &cpuThreshold, 0, NULL);
+
+    printf("Monitoring started. Press Enter to stop...\n");
+    getchar(); // Consume the newline character left by scanf
+    getchar(); // Wait for user input to exit
+
+    // Stop monitoring
+    keepMonitoring = FALSE;
+
+    // Wait for the thread to finish
+    WaitForSingleObject(hThread, INFINITE);
+
+    // Cleanup
+    CloseHandle(hThread);
+    printf("Monitoring stopped.\n");
+
+    return 0;
+}
